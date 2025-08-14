@@ -33,18 +33,11 @@ public:
         open_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("open_gripper");
         close_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("close_gripper");
 
-        if (!action_client_->wait_for_action_server(10s))
-        {
-            RCLCPP_ERROR(this->get_logger(), "Action server not available after waiting");
-            rclcpp::shutdown();
-            return;
+        while (!action_client_->wait_for_action_server(3s)) {
+            RCLCPP_WARN(this->get_logger(), "Waiting for action server...");
         }
-
-        if (!open_gripper_client_->wait_for_service(10s))
-        {
-            RCLCPP_ERROR(this->get_logger(), "Gripper service not available after waiting");
-            rclcpp::shutdown();
-            return;
+        while (!open_gripper_client_->wait_for_service(3s)) {
+            RCLCPP_WARN(this->get_logger(), "Waiting for gripper service...");
         }
 
         time_between_points_ = 0.5; // Time between points in seconds
@@ -146,6 +139,7 @@ private:
 
     void prepare_trajectories()
     {
+        // Trajectories are expected to loop
         // Define the trajectories
         // Trajectory 1
         trajectory_msgs::msg::JointTrajectory traj1;
@@ -168,10 +162,11 @@ private:
 
     void send_next_trajectory()
     {
+        // Trajectories are expected to loop
         if (current_trajectory_index_ >= trajectories_.size())
         {
-            RCLCPP_INFO(this->get_logger(), "All trajectories executed successfully");
-            return;
+            RCLCPP_INFO(this->get_logger(), "All trajectories executed successfully. Next loop.");
+            current_trajectory_index_ = 0;
         }
 
         auto goal_msg = FollowJointTrajectory::Goal();
@@ -218,28 +213,6 @@ private:
 
     void handle_trajectory_success()
     {
-        // Call the gripper service based on the trajectory index
-        auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-        auto future = close_gripper_client_->async_send_request(request);
-        std::this_thread::sleep_for(2s);
-
-        if (future.wait_for(5s) == std::future_status::ready)
-        {
-            auto response = future.get();
-            if (response->success)
-            {
-                RCLCPP_INFO(this->get_logger(), "Gripper service call succeeded: %s", response->message.c_str());
-            }
-            else
-            {
-                RCLCPP_WARN(this->get_logger(), "Gripper service call failed: %s", response->message.c_str());
-            }
-        }
-        else
-        {
-            RCLCPP_ERROR(this->get_logger(), "Gripper service call timed out");
-        }
-
         // Proceed to the next trajectory
         current_trajectory_index_++;
         send_next_trajectory();
