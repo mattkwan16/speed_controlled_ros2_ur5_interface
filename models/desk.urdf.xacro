@@ -38,7 +38,7 @@
     <visual name="visual">
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/desk.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/desk.stl" scale="0.001 0.001 0.001" />
       </geometry>
       <material name="grey_material">
         <color rgba="0.5 0.5 0.5 1.0"/> <!-- Grey color, fully opaque -->

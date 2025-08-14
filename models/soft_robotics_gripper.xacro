@@ -21,14 +21,14 @@
       <visual>
         <origin rpy="0 0 0" xyz="0 0 -0.0095" />
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/base.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/base.stl"/>
         </geometry>
         <material name="Grey" />
       </visual>
       <collision>
         <origin rpy="0 0 0" xyz="0 0 -0.0095" />
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/base.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/base.stl"/>
         </geometry>
       </collision>
       <inertial>
@@ -50,14 +50,14 @@
       <visual>
         <origin rpy="0 0 0" xyz="0 0 0" />
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link1.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link1.stl"/>
         </geometry>
         <material name="Blue" />
       </visual>
       <collision>
         <origin rpy="0 0 0" xyz="0 0 0" />
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link1.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link1.stl"/>
         </geometry>
       </collision>
       <inertial>
@@ -79,14 +79,14 @@
       <visual>
         <origin rpy="0 0 0" xyz="0 0 0" />
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link1.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link1.stl"/>
         </geometry>
         <material name="Blue" />
       </visual>
       <collision>
         <origin rpy="0 0 0" xyz="0 0 0" />
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link1.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link1.stl"/>
         </geometry>
       </collision>
       <inertial>
@@ -105,13 +105,13 @@
     <link name="${prefix}soft_robotics_left_finger_link2">
       <visual>
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link2.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link2.stl"/>
         </geometry>
         <material name="Blue" />
       </visual>
       <collision>
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link2.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link2.stl"/>
         </geometry>
       </collision>
       <inertial>
@@ -130,13 +130,13 @@
     <link name="${prefix}soft_robotics_right_finger_link2">
       <visual>
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link2.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link2.stl"/>
         </geometry>
         <material name="Blue" />
       </visual>
       <collision>
         <geometry>
-          <mesh filename="file://$(find ros2_ur5_interface)/models/meshes/link2.stl"/>
+          <mesh filename="file://$(find speed_controlled_ros2_ur5_interface)/models/meshes/link2.stl"/>
         </geometry>
       </collision>
       <inertial>

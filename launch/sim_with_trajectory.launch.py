@@ -9,12 +9,12 @@ def generate_launch_description():
     """Launch the UR5 simulation and trajectory publisher."""
 
     # Path to ros2_ur5_interface package
-    ros2_ur5_interface_dir = get_package_share_directory('ros2_ur5_interface')
+    ros2_ur5_interface_dir = get_package_share_directory('speed_controlled_ros2_ur5_interface')
     sim_launch_file = os.path.join(ros2_ur5_interface_dir, 'launch', 'sim.launch.py')
 
     # Node: trajectory publisher
     trajectory_publisher_node = Node(
-        package='ros2_ur5_interface',
+        package='speed_controlled_ros2_ur5_interface',
         executable='publish_trajectory_node',
         name='publish_trajectory_node',
         output='screen'

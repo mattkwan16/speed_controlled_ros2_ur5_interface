@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>ros2_ur5_interface</name>
+  <name>speed_controlled_ros2_ur5_interface</name>
   <version>2.4.1</version>
   <description>
     UNITN UR5 simulation
