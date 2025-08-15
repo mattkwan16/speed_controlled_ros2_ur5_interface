@@ -30,6 +30,10 @@ public:
         subscription_ = this->create_subscription<sensor_msgs::msg::JointState>(
             "joint_states", 10, std::bind(&TrajectoryActionClient::joint_state_callback, this, std::placeholders::_1));
 
+        // sender to speed controller
+        override_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/override_trajectory", 10);
+
+
         open_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("open_gripper");
         close_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("close_gripper");
 
@@ -46,6 +50,7 @@ public:
 private:
     rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr subscription_;
+    rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr override_pub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr open_gripper_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr close_gripper_client_;
     double time_between_points_;
@@ -174,7 +179,7 @@ private:
         goal_msg.goal_time_tolerance.nanosec = 500000000;
 
         RCLCPP_INFO(this->get_logger(), "Sending trajectory goal %zu", current_trajectory_index_ + 1);
-
+/*
         auto send_goal_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
         send_goal_options.goal_response_callback =
             [this](const GoalHandleFollowJointTrajectory::SharedPtr &goal_handle) {
@@ -207,8 +212,9 @@ private:
                     break;
                 }
             };
-
-        action_client_->async_send_goal(goal_msg, send_goal_options);
+*/
+        // Send to speed scaler
+        override_pub_->publish(trajectories_[current_trajectory_index_]);
     }
 
     void handle_trajectory_success()

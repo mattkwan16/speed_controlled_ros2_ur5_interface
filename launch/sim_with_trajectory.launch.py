@@ -20,9 +20,18 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Node: speed control
+    speed_control_node = Node(
+        package='speed_controlled_ros2_ur5_interface',
+        executable='speed_control_node',
+        name='speed_control_node',
+        output='screen'
+    )
+
     return LaunchDescription([
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(sim_launch_file)
         ),
         trajectory_publisher_node,
+        speed_control_node
     ])
