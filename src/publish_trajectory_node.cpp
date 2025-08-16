@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <control_msgs/msg/joint_tolerance.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -32,7 +33,13 @@ public:
 
         // sender to speed controller
         override_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/override_trajectory", 10);
+        override_ack_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "/override_ack", 10, [this](const std_msgs::msg::String::SharedPtr msg){
+                RCLCPP_INFO(this->get_logger(), "ACK: %s", msg->data.c_str());
+            });
 
+        override_result_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "/override_result", 10, std::bind(&TrajectoryActionClient::override_result_cb, this, std::placeholders::_1));
 
         open_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("open_gripper");
         close_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("close_gripper");
@@ -51,6 +58,8 @@ private:
     rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr subscription_;
     rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr override_pub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr override_ack_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr override_result_sub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr open_gripper_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr close_gripper_client_;
     double time_between_points_;
@@ -215,6 +224,16 @@ private:
 */
         // Send to speed scaler
         override_pub_->publish(trajectories_[current_trajectory_index_]);
+    }
+
+    void override_result_cb(const std_msgs::msg::String::SharedPtr msg)
+    {
+        if (msg->data == "SUCCEEDED") {
+            RCLCPP_INFO(this->get_logger(), "Success: Override result: %s", msg->data.c_str());
+            handle_trajectory_success();
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Warn: Override result: %s", msg->data.c_str());
+        }
     }
 
     void handle_trajectory_success()
