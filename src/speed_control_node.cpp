@@ -1,14 +1,13 @@
-// speed_control_node.cpp
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <builtin_interfaces/msg/duration.hpp>
 #include <chrono>
-#include <controller_manager_msgs/srv/switch_controller.hpp>
-#include <queue>
-#include <mutex>
+#include <thread>
 #include <cmath>
 
 using namespace std::chrono_literals;
@@ -20,16 +19,21 @@ public:
   using GoalHandleFollowJointTrajectory = rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
 
   SpeedControlNode()
-  : Node("speed_control_node"),
+  : Node("speed_control_node_simple"),
     speed_fraction_(1.0),
-    max_queue_size_(10),
-    sending_goal_(false)
+    has_active_traj_(false)
   {
-    traj_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-      "/override_trajectory", 10, std::bind(&SpeedControlNode::traj_cb, this, std::placeholders::_1));
+    override_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+      "/override_trajectory", 10,
+      std::bind(&SpeedControlNode::on_override, this, std::placeholders::_1));
+
+    joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+      "/joint_states", 50,
+      std::bind(&SpeedControlNode::on_joint_state, this, std::placeholders::_1));
 
     speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
-      "/speed_command", 10, std::bind(&SpeedControlNode::speed_cb, this, std::placeholders::_1));
+      "/speed_command", 10,
+      std::bind(&SpeedControlNode::on_speed, this, std::placeholders::_1));
 
     ack_pub_ = this->create_publisher<std_msgs::msg::String>("/override_ack", 10);
     result_pub_ = this->create_publisher<std_msgs::msg::String>("/override_result", 10);
@@ -37,275 +41,249 @@ public:
     action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
       this, "/scaled_joint_trajectory_controller/follow_joint_trajectory");
 
-    switch_client_ = this->create_client<controller_manager_msgs::srv::SwitchController>(
-      "/controller_manager/switch_controller");
-
-    while (!action_client_->wait_for_action_server(3s)) {
-        RCLCPP_WARN(this->get_logger(), "Waiting for action server...");
+    RCLCPP_INFO(this->get_logger(), "Waiting for action server...");
+    if (!action_client_->wait_for_action_server(10s)) {
+      RCLCPP_WARN(this->get_logger(), "Action server not available (waited 10s). Node still running and will try when sending.");
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Action server available.");
     }
-    
-    RCLCPP_INFO(this->get_logger(), "SpeedControlNode ready");
   }
 
 private:
-  // Subscriptions / publishers / clients
-  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr traj_sub_;
+  // ROS interfaces
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr override_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr speed_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ack_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr result_pub_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
-  rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_client_;
 
-  // Internal queue + state
-  std::mutex mutex_;
-  std::queue<trajectory_msgs::msg::JointTrajectory> queue_;
+  // internal state (single-trajectory)
+  trajectory_msgs::msg::JointTrajectory current_traj_;
+  bool has_active_traj_;
+  rclcpp::Time active_goal_start_time_;
+  rclcpp::Time active_goal_sent_time_; // same as start_time but explicit
+  std::shared_ptr<GoalHandleFollowJointTrajectory> active_goal_handle_;
+  sensor_msgs::msg::JointState::SharedPtr last_joint_state_;
   double speed_fraction_;
-  const size_t max_queue_size_;
-  bool sending_goal_;
 
-  // speed handler
-  void speed_cb(const std_msgs::msg::Float32::SharedPtr msg)
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    speed_fraction_ = std::max(0.0f, std::min(1.0f, msg->data));
-    RCLCPP_INFO(this->get_logger(), "Speed fraction set to: %f", speed_fraction_);
-
-    if (speed_fraction_ <= 0.0) {
-      // hard stop: cancel and stop controller
-      RCLCPP_WARN(this->get_logger(), "speed_fraction == 0 -> cancelling goals and stopping controller");
-      cancel_all_goals();
-      stop_controller();
-    } else {
-      // ensure controller running
-      start_controller();
-      // if nothing is sending but we have queued items, start sending
-      if (!sending_goal_ && !queue_.empty()) {
-        // launch send_next_from_queue outside of lock
-        lock.~lock_guard();
-        send_next_from_queue();
-      }
-    }
+  // -------------------------
+  // Helpers
+  // -------------------------
+  static double normalize_angle(double a) {
+    const double two_pi = 2.0 * M_PI;
+    a = std::fmod(a + M_PI, two_pi);
+    if (a < 0) a += two_pi;
+    return a - M_PI;
   }
 
-  // trajectory subscription
-  void traj_cb(const trajectory_msgs::msg::JointTrajectory::SharedPtr traj_msg)
-  {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (queue_.size() >= max_queue_size_) {
-        std_msgs::msg::String nack;
-        nack.data = "NACK: queue full";
-        ack_pub_->publish(nack);
-        RCLCPP_WARN(this->get_logger(), "Incoming trajectory rejected: queue full");
-        return;
+  double joint_pos_from_last_state(const std::string &name) {
+    if (!last_joint_state_) return 0.0;
+    for (size_t i=0; i<last_joint_state_->name.size(); ++i) {
+      if (last_joint_state_->name[i] == name) {
+        return normalize_angle(last_joint_state_->position[i]); // already radians per ROS spec
       }
-      queue_.push(*traj_msg);
     }
-
-    // ack that we accepted it into the queue
-    std_msgs::msg::String ack;
-    ack.data = "ACCEPTED";
-    ack_pub_->publish(ack);
-    RCLCPP_INFO(this->get_logger(), "Trajectory queued (current queue size unknown to publisher)");
-
-    // If no goal currently running, start sending now
-    bool should_start = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!sending_goal_) should_start = true;
+    // not found -> return 0 and warn once
+    static std::unordered_set<std::string> warned;
+    if (warned.find(name) == warned.end()) {
+      RCLCPP_WARN(this->get_logger(), "Joint '%s' not found in /joint_states; using 0.0", name.c_str());
+      warned.insert(name);
     }
-    if (should_start) {
-      send_next_from_queue();
-    }
+    return 0.0;
   }
 
-  // cancel all goals helper
-  void cancel_all_goals()
-  {
+  // Build and send a FollowJointTrajectory goal using `traj` as-is.
+  // This sets active goal tracking state.
+  void send_trajectory_goal(const trajectory_msgs::msg::JointTrajectory & traj) {
     if (!action_client_->action_server_is_ready()) {
-      RCLCPP_INFO(this->get_logger(), "Action server not available");
-      return;
-    }
-    // Cancel existing goals
-    auto f = action_client_->async_cancel_all_goals(
-      [this](std::shared_ptr<rclcpp_action::Client<FollowJointTrajectory>::CancelResponse> cancel_response) {
-        if (cancel_response && cancel_response->return_code == action_msgs::srv::CancelGoal_Response::ERROR_NONE) {
-          RCLCPP_INFO(this->get_logger(), "Successfully canceled all goals");
-        } else {
-          RCLCPP_ERROR(this->get_logger(), "Failed to cancel goals");
-        }
-      }
-    );
-  }
-
-  // start controller helper
-  void start_controller()
-  {
-    if (!switch_client_->wait_for_service(1s)) {
-      RCLCPP_WARN(this->get_logger(), "switch_controller not available to start controller");
-      return;
-    }
-    auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-    req->activate_controllers = {"scaled_joint_trajectory_controller"};
-    req->deactivate_controllers = {};
-    req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
-    auto fut = switch_client_->async_send_request(req, 
-      [this](rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedFuture future) {
-        auto res = future.get();
-        if (res->ok)
-        {
-            RCLCPP_INFO(this->get_logger(), "Requested start of scaled_joint_trajectory_controller");
-        }
-        else
-        {
-            RCLCPP_ERROR(this->get_logger(), "Failed to request start of controller");
-        }
-      }
-    );
-  }
-
-  // stop controller helper
-  void stop_controller()
-  {
-    if (!switch_client_->wait_for_service(1s)) {
-      RCLCPP_WARN(this->get_logger(), "switch_controller not available to stop controller");
-      return;
-    }
-    auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-    req->deactivate_controllers = {"scaled_joint_trajectory_controller"};
-    req->activate_controllers = {};
-    req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
-    auto fut = switch_client_->async_send_request(req);
-    if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), fut, 2s) == rclcpp::FutureReturnCode::SUCCESS) {
-      RCLCPP_INFO(this->get_logger(), "Requested stop of scaled_joint_trajectory_controller");
-    } else {
-      RCLCPP_ERROR(this->get_logger(), "Failed to request stop of controller");
-    }
-  }
-
-  // take next queued trajectory, scale it and send as an action goal
-  void send_next_from_queue()
-  {
-    trajectory_msgs::msg::JointTrajectory traj;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (queue_.empty() || sending_goal_) {
-        return;
-      }
-      traj = queue_.front();
-      queue_.pop();
-      sending_goal_ = true;
-    }
-
-    // check speed fraction
-    double local_speed;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      local_speed = speed_fraction_;
-    }
-    if (local_speed <= 0.0) {
-      RCLCPP_WARN(this->get_logger(), "Not sending queued trajectory because speed_fraction == 0");
-      std::lock_guard<std::mutex> lock(mutex_);
-      sending_goal_ = false;
+      RCLCPP_WARN(this->get_logger(), "Action server not available when trying to send trajectory");
+      // still store as current so we can try later
+      current_traj_ = traj;
+      has_active_traj_ = true;
       return;
     }
 
-    auto scaled = scale_trajectory(traj, local_speed);
-
-    // wait for server
-    if (!action_client_->wait_for_action_server(3s)) {
-      RCLCPP_ERROR(this->get_logger(), "Action server not available");
-      std::lock_guard<std::mutex> lock(mutex_);
-      // push back so we don't lose it
-      queue_.push(traj);
-      sending_goal_ = false;
-      return;
-    }
-
-    // build goal
-    auto goal_msg = FollowJointTrajectory::Goal();
-    goal_msg.trajectory = scaled;
-    goal_msg.goal_time_tolerance.nanosec = 500000000;
+    auto goal = FollowJointTrajectory::Goal();
+    goal.trajectory = traj;
+    goal.goal_time_tolerance.sec = 0;
+    goal.goal_time_tolerance.nanosec = 500000000;
 
     auto send_goal_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
-    // optional: publish ack when accepted by action server
+
     send_goal_options.goal_response_callback =
       [this](const GoalHandleFollowJointTrajectory::SharedPtr &goal_handle) {
         std_msgs::msg::String ack;
-        if (!goal_handle) 
-        {
-                ack.data = "REJECTED_BY_ACTION_SERVER";
-                RCLCPP_ERROR(this->get_logger(), "Goal was rejected by the server");
-        }
-        else
-        {
-                ack.data = "SENT_TO_ACTION_SERVER";
-                RCLCPP_INFO(this->get_logger(), "Goal accepted by the server, waiting for result");
+        if (!goal_handle) {
+          ack.data = "REJECTED";
+          RCLCPP_ERROR(this->get_logger(), "Goal rejected by server");
+        } else {
+          ack.data = "ACCEPTED";
+          RCLCPP_INFO(this->get_logger(), "Goal accepted by server");
         }
         ack_pub_->publish(ack);
+        active_goal_handle_ = goal_handle;
       };
-
 
     send_goal_options.result_callback =
-        [this](const GoalHandleFollowJointTrajectory::WrappedResult &result) {
-            std_msgs::msg::String out;
-            switch (result.code)
-            {
-            case rclcpp_action::ResultCode::SUCCEEDED:
-                RCLCPP_INFO(this->get_logger(), "Goal succeeded");
-                out.data = "SUCCEEDED";
-                break;
-            case rclcpp_action::ResultCode::ABORTED:
-                RCLCPP_ERROR(this->get_logger(), "Goal was aborted");
-                out.data = "ABORTED";
-                break;
-            case rclcpp_action::ResultCode::CANCELED:
-                RCLCPP_WARN(this->get_logger(), "Goal was canceled");
-                out.data = "CANCELED";
-                break;
-            default:
-                RCLCPP_ERROR(this->get_logger(), "Unknown result code");
-                out.data = "UNKNOWN";
-                break;
-            }
-
-        // publish result to origin
-        result_pub_->publish(out);
-
-        // mark done and trigger next item
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          sending_goal_ = false;
+      [this](const rclcpp_action::ClientGoalHandle<FollowJointTrajectory>::WrappedResult & result) {
+        std_msgs::msg::String out;
+        if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+          out.data = "SUCCEEDED";
+          RCLCPP_INFO(this->get_logger(), "Active goal SUCCEEDED");
+        } else if (result.code == rclcpp_action::ResultCode::CANCELED) {
+          out.data = "CANCELED";
+          RCLCPP_WARN(this->get_logger(), "Active goal CANCELED");
+        } else {
+          out.data = "ABORTED";
+          RCLCPP_ERROR(this->get_logger(), "Active goal ABORTED/FAILED");
         }
-        // dispatch next after a tiny delay to avoid recursion inside action callback
-        auto timer = this->create_wall_timer(10ms, [this]() {
-          this->send_next_from_queue();
-        });
-        // timer will be destroyed after firing (it is captured by node until callback runs)
+        // publish result and clear active state
+        result_pub_->publish(out);
+        has_active_traj_ = false;
+        active_goal_handle_.reset();
       };
 
-    RCLCPP_INFO(this->get_logger(), "Sending scaled trajectory (speed_fraction=%f)", local_speed);
-    action_client_->async_send_goal(goal_msg, send_goal_options);
+    // send and record start time
+    auto fut = action_client_->async_send_goal(goal, send_goal_options);
+    // we don't block waiting for acceptance; but record the time we sent it
+    active_goal_sent_time_ = this->now();
+    active_goal_start_time_ = active_goal_sent_time_;
+    has_active_traj_ = true;
+    current_traj_ = traj;
   }
 
-  // scaling helper
-  trajectory_msgs::msg::JointTrajectory scale_trajectory(const trajectory_msgs::msg::JointTrajectory & in, double speed_fraction)
+  // compute elapsed seconds since active_goal_start_time_
+  double active_elapsed_seconds() const {
+    if (!has_active_traj_) return 0.0;
+    rclcpp::Time now = this->now();
+    return (now - active_goal_start_time_).seconds();
+  }
+
+  // Build a new trajectory that starts at current joint positions (ordered to traj.joint_names),
+  // and includes remaining points from `traj` after `elapsed` seconds, with times scaled by 1/speed_factor.
+  trajectory_msgs::msg::JointTrajectory build_rescaled_remaining(const trajectory_msgs::msg::JointTrajectory & traj,
+                                                                 double elapsed,
+                                                                 double speed_factor)
   {
     trajectory_msgs::msg::JointTrajectory out;
-    out.joint_names = in.joint_names;
-    double factor = 1.0 / std::max(1e-6, speed_fraction);
-    for (const auto & p : in.points) {
+    out.joint_names = traj.joint_names;
+
+    // Point 0: current actual positions, at t=0
+    trajectory_msgs::msg::JointTrajectoryPoint p0;
+    p0.positions.reserve(out.joint_names.size());
+    for (const auto &jn : out.joint_names) {
+      p0.positions.push_back(joint_pos_from_last_state(jn));
+    }
+    p0.time_from_start.sec = 0;
+    p0.time_from_start.nanosec = 0;
+    out.points.push_back(p0);
+
+    if (speed_factor <= 0.0) {
+      // paused — no remaining points appended
+      return out;
+    }
+
+    double factor = 1.0 / std::max(1e-6, speed_factor);
+
+    // For each original point, if its orig_time > elapsed + tiny_eps, include with new time = (orig_time - elapsed) * factor
+    const double tiny_eps = 1e-4;
+    for (const auto &pt : traj.points) {
+      double orig_t = double(pt.time_from_start.sec) + double(pt.time_from_start.nanosec)/1e9;
+      double remaining = orig_t - elapsed;
+      if (remaining <= tiny_eps) continue;
+      double new_t = remaining * factor;
       trajectory_msgs::msg::JointTrajectoryPoint np;
-      np.positions = p.positions;
-      np.velocities = p.velocities;
-      np.accelerations = p.accelerations;
-      double secs = p.time_from_start.sec + p.time_from_start.nanosec / 1e9;
-      double scaled = secs * factor;
-      np.time_from_start.sec = static_cast<int32_t>(std::floor(scaled));
-      np.time_from_start.nanosec = static_cast<uint32_t>((scaled - std::floor(scaled)) * 1e9);
+      np.positions = pt.positions;
+      np.velocities = pt.velocities;
+      np.accelerations = pt.accelerations;
+      // set time_from_start relative to goal start (now)
+      int64_t sec = static_cast<int64_t>(std::floor(new_t));
+      int64_t nsec = static_cast<int64_t>((new_t - sec) * 1e9);
+      if (nsec < 0) nsec = 0;
+      np.time_from_start.sec = static_cast<int32_t>(sec);
+      np.time_from_start.nanosec = static_cast<uint32_t>(nsec);
       out.points.push_back(np);
     }
     return out;
+  }
+
+  // -------------------------
+  // Callbacks
+  // -------------------------
+  void on_override(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
+    // Replace any active trajectory with this one and send immediately.
+    RCLCPP_INFO(this->get_logger(), "Received override trajectory with %zu points", msg->points.size());
+
+    // cancel any active goal (best-effort)
+    if (action_client_->action_server_is_ready()) {
+      auto fut = action_client_->async_cancel_all_goals();
+      std::this_thread::sleep_for(40ms); // allow cancel to propagate
+    }
+
+    // store and send new trajectory as-is (no queue)
+    current_traj_ = *msg;
+    has_active_traj_ = false; // will be set by send_trajectory_goal
+    current_traj_ = build_rescaled_remaining(current_traj_, 0.0, speed_fraction_); // carry over existing speed
+    send_trajectory_goal(current_traj_);
+    // publish ack
+    std_msgs::msg::String s; s.data = "ACCEPTED";
+    ack_pub_->publish(s);
+  }
+
+  void on_joint_state(const sensor_msgs::msg::JointState::SharedPtr msg) {
+    // just store the latest joint state for building re-issued trajectories
+    last_joint_state_ = msg;
+  }
+
+  void on_speed(const std_msgs::msg::Float32::SharedPtr msg) {
+    double new_speed = std::clamp(static_cast<double>(msg->data), -1e6, 1.0); // accept <=0 as pause
+    RCLCPP_INFO(this->get_logger(), "Received speed_command = %f", new_speed);
+
+    // if no active traj, just update speed_fraction_ and return
+    if (!has_active_traj_) {
+      speed_fraction_ = new_speed;
+      return;
+    }
+
+    // if speed <= 0 -> pause: cancel current goal and keep current_traj_ intact for resume
+    if (new_speed <= 0.0) {
+      RCLCPP_INFO(this->get_logger(), "Pausing execution (speed <= 0). Cancelling active goal.");
+      speed_fraction_ = new_speed;
+      if (action_client_->action_server_is_ready()) {
+        auto fut = action_client_->async_cancel_all_goals();
+        std::this_thread::sleep_for(40ms);
+      }
+      // leave current_traj_ intact so we can resume later
+      has_active_traj_ = true;  // mark that we have a traj but not executing
+      return;
+    }
+
+    // positive speed -> rescale remaining and reissue
+    speed_fraction_ = new_speed;
+    RCLCPP_INFO(this->get_logger(), "Rescaling remaining trajectory with speed %f", speed_fraction_);
+
+    // compute elapsed time on the currently active goal
+    double elapsed = active_elapsed_seconds();
+
+    // cancel current goal first
+    if (action_client_->action_server_is_ready()) {
+      auto fut = action_client_->async_cancel_all_goals();
+      std::this_thread::sleep_for(40ms);
+    }
+
+    // Build new trajectory: start at actual pose, append remaining points scaled
+    if (!last_joint_state_) {
+      RCLCPP_WARN(this->get_logger(), "No /joint_states received yet; cannot reissue remaining trajectory reliably.");
+      // simply re-send original trajectory at new speed by constructing scaled version from start
+      auto rescaled = build_rescaled_remaining(current_traj_, 0.0, speed_fraction_);
+      send_trajectory_goal(rescaled);
+      return;
+    }
+
+    // build and send
+    auto new_traj = build_rescaled_remaining(current_traj_, elapsed, speed_fraction_);
+    send_trajectory_goal(new_traj);
   }
 };
 
@@ -313,6 +291,7 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<SpeedControlNode>();
+  // use single-threaded spinning
   rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
