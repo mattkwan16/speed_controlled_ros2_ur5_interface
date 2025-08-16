@@ -1,14 +1,17 @@
+// speed_control_node.cpp
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
+#include <trajectory_msgs/msg/joint_trajectory_point.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <builtin_interfaces/msg/duration.hpp>
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <vector>
+#include <algorithm>
 
 using namespace std::chrono_literals;
 
@@ -16,19 +19,26 @@ class SpeedControlNode : public rclcpp::Node
 {
 public:
   using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
+  using GoalHandle = rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
   using GoalHandleFollowJointTrajectory = rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
 
   SpeedControlNode()
-  : Node("speed_control_node_simple"),
+  : Node("speed_control_node"),
     speed_fraction_(1.0),
-    has_active_traj_(false)
+    has_target_(false),
+    has_active_goal_(false),
+    base_time_between_points_(0.3),   // base tempo (seconds) per segment at speed=1.0
+    min_time_between_points_(0.02)    // avoid tiny dt that causes jumps
   {
+    // joints used by UR5 typical ordering used earlier
+    joint_names_ = {"shoulder_pan_joint","shoulder_lift_joint","elbow_joint","wrist_1_joint","wrist_2_joint","wrist_3_joint"};
+
     override_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
       "/override_trajectory", 10,
       std::bind(&SpeedControlNode::on_override, this, std::placeholders::_1));
 
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-      "/joint_states", 50,
+      "/joint_states", 100,
       std::bind(&SpeedControlNode::on_joint_state, this, std::placeholders::_1));
 
     speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
@@ -41,12 +51,7 @@ public:
     action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
       this, "/scaled_joint_trajectory_controller/follow_joint_trajectory");
 
-    RCLCPP_INFO(this->get_logger(), "Waiting for action server...");
-    if (!action_client_->wait_for_action_server(10s)) {
-      RCLCPP_WARN(this->get_logger(), "Action server not available (waited 10s). Node still running and will try when sending.");
-    } else {
-      RCLCPP_INFO(this->get_logger(), "Action server available.");
-    }
+    RCLCPP_INFO(this->get_logger(), "SpeedControlNode ready");
   }
 
 private:
@@ -58,18 +63,25 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr result_pub_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
 
-  // internal state (single-trajectory)
-  trajectory_msgs::msg::JointTrajectory current_traj_;
-  bool has_active_traj_;
-  rclcpp::Time active_goal_start_time_;
-  rclcpp::Time active_goal_sent_time_; // same as start_time but explicit
-  std::shared_ptr<GoalHandleFollowJointTrajectory> active_goal_handle_;
+  // simple state
+  std::vector<std::string> joint_names_;
   sensor_msgs::msg::JointState::SharedPtr last_joint_state_;
-  double speed_fraction_;
+  double speed_fraction_;                // 0..1 (0 => pause)
+  bool has_target_;
+  std::vector<double> target_positions_; // final destination (last point of override)
+  size_t target_num_points_;             // how many segments to create
+  bool has_active_goal_;
+  std::shared_ptr<GoalHandle> active_goal_handle_;
+  trajectory_msgs::msg::JointTrajectory original_traj_;
+  rclcpp::Time active_goal_start_time_;
 
-  // -------------------------
-  // Helpers
-  // -------------------------
+  // timing params
+  double base_time_between_points_;
+  double min_time_between_points_;
+
+  // ----------------------------
+  // Utilities
+  // ----------------------------
   static double normalize_angle(double a) {
     const double two_pi = 2.0 * M_PI;
     a = std::fmod(a + M_PI, two_pi);
@@ -77,33 +89,118 @@ private:
     return a - M_PI;
   }
 
-  double joint_pos_from_last_state(const std::string &name) {
-    if (!last_joint_state_) return 0.0;
-    for (size_t i=0; i<last_joint_state_->name.size(); ++i) {
-      if (last_joint_state_->name[i] == name) {
-        return normalize_angle(last_joint_state_->position[i]); // already radians per ROS spec
+  // return current positions in the order of joint_names_; if joint_states missing, return zeros
+  std::vector<double> get_current_positions_ordered() {
+    std::vector<double> out(joint_names_.size(), 0.0);
+    if (!last_joint_state_) return out;
+    for (size_t i=0; i<joint_names_.size(); ++i) {
+      const auto &jn = joint_names_[i];
+      for (size_t k=0; k<last_joint_state_->name.size(); ++k) {
+        if (last_joint_state_->name[k] == jn) {
+          out[i] = normalize_angle(last_joint_state_->position[k]);
+          break;
+        }
       }
     }
-    // not found -> return 0 and warn once
-    static std::unordered_set<std::string> warned;
-    if (warned.find(name) == warned.end()) {
-      RCLCPP_WARN(this->get_logger(), "Joint '%s' not found in /joint_states; using 0.0", name.c_str());
-      warned.insert(name);
-    }
-    return 0.0;
+    return out;
   }
 
-  // Build and send a FollowJointTrajectory goal using `traj` as-is.
-  // This sets active goal tracking state.
+  void cancel_active_goal_wait() {
+  if (action_client_->action_server_is_ready()) {
+    action_client_->async_cancel_all_goals(
+        [this](std::shared_ptr<action_msgs::srv::CancelGoal_Response> response) {
+          if (!response) {
+            RCLCPP_ERROR(this->get_logger(), "Cancellation response was null.");
+            return;
+          }
+
+          if (response->return_code == action_msgs::srv::CancelGoal_Response::ERROR_NONE) {
+            RCLCPP_INFO(this->get_logger(), "All goals accepted for cancellation.");
+            // build a fresh trajectory: current -> target, using base_time_between_points_ scaled by speed_fraction_
+            std::vector<double> start = this->get_current_positions_ordered();
+            int num_pts = static_cast<int>(target_num_points_);
+            double tbp = base_time_between_points_ / std::max(1e-6, speed_fraction_);
+            trajectory_msgs::msg::JointTrajectory traj = this->generate_trajectory_segment(start, target_positions_, num_pts, tbp);
+
+            // send it
+            this->send_trajectory_goal(traj);
+
+            // ack
+            std_msgs::msg::String s; s.data = "ACCEPTED";
+            ack_pub_->publish(s);
+          } else {
+            RCLCPP_WARN(this->get_logger(), "Cancellation request failed.");
+          }
+        });
+  } else {
+    RCLCPP_WARN(this->get_logger(), "Action server not ready, cannot send cancel request.");
+  }
+}
+
+  // cancel active goal (best-effort) and wait briefly for cancellation to propagate
+  /*
+  void cancel_active_goal_wait() {
+    if (!action_client_) return;
+    if (active_goal_handle_) {
+      // wait short time for cancel to process
+      auto fut = action_client_->async_cancel_all_goals();
+      std::this_thread::sleep_for(500ms);
+      active_goal_handle_.reset();
+      has_active_goal_ = false;
+      std::this_thread::sleep_for(20ms);
+      return;
+    }
+    // fallback
+    auto fut2 = action_client_->async_cancel_all_goals();
+    std::this_thread::sleep_for(500ms);
+    has_active_goal_ = false;
+    std::this_thread::sleep_for(20ms);
+  }
+  */
+
+  // adapted from publish_trajectory_node.cpp
+  trajectory_msgs::msg::JointTrajectory generate_trajectory_segment(
+        const std::vector<double>& start_config,
+        const std::vector<double>& end_config,
+        int num_points, double tbp)
+    {
+        trajectory_msgs::msg::JointTrajectory traj_msg;
+        traj_msg.joint_names = joint_names_;
+
+        // Total interpolation time (N points * tbp)
+        double total_time = (num_points * tbp) == 0 ? 1 : num_points * tbp;
+
+        for (int i = 0; i <= num_points; i++)
+        {
+            trajectory_msgs::msg::JointTrajectoryPoint point;
+            double t = i * tbp;
+
+            for (size_t j = 0; j < start_config.size(); j++)
+            {
+                double interpolated_position = start_config[j] + (t / total_time) * (end_config[j] - start_config[j]);
+                point.positions.push_back(interpolated_position);
+            }
+            RCLCPP_INFO(this->get_logger(), "Trajectory point %d: %f %f %f %f %f %f", i, point.positions[0], point.positions[1], point.positions[2], point.positions[3], point.positions[4], point.positions[5]);
+
+            point.time_from_start = rclcpp::Duration::from_seconds(t);
+            traj_msg.points.push_back(point);
+        }
+
+        return traj_msg;
+    }
+
+  // send a trajectory as an action goal (simple)
   void send_trajectory_goal(const trajectory_msgs::msg::JointTrajectory & traj) {
-    if (!action_client_->action_server_is_ready()) {
-      RCLCPP_WARN(this->get_logger(), "Action server not available when trying to send trajectory");
-      // still store as current so we can try later
-      current_traj_ = traj;
-      has_active_traj_ = true;
+    if (!action_client_) return;
+
+    // ensure server available (best-effort)
+    if (!action_client_->wait_for_action_server(1s)) {
+      RCLCPP_WARN(this->get_logger(), "Action server not available right now; storing target and will try later.");
+      // store so on future speed/override we'll resend
       return;
     }
 
+    // Build goal
     auto goal = FollowJointTrajectory::Goal();
     goal.trajectory = traj;
     goal.goal_time_tolerance.sec = 0;
@@ -111,8 +208,9 @@ private:
 
     auto send_goal_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
 
+    // when server accepts, store handle (we don't do fancy start-time math)
     send_goal_options.goal_response_callback =
-      [this](const GoalHandleFollowJointTrajectory::SharedPtr &goal_handle) {
+      [this](const std::shared_ptr<GoalHandle> & goal_handle) {
         std_msgs::msg::String ack;
         if (!goal_handle) {
           ack.data = "REJECTED";
@@ -120,9 +218,11 @@ private:
         } else {
           ack.data = "ACCEPTED";
           RCLCPP_INFO(this->get_logger(), "Goal accepted by server");
+          active_goal_handle_ = goal_handle;
+          has_active_goal_ = true;
+          active_goal_start_time_ = this->now();
         }
         ack_pub_->publish(ack);
-        active_goal_handle_ = goal_handle;
       };
 
     send_goal_options.result_callback =
@@ -130,160 +230,83 @@ private:
         std_msgs::msg::String out;
         if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
           out.data = "SUCCEEDED";
-          RCLCPP_INFO(this->get_logger(), "Active goal SUCCEEDED");
+          RCLCPP_INFO(this->get_logger(), "Goal SUCCEEDED");
         } else if (result.code == rclcpp_action::ResultCode::CANCELED) {
           out.data = "CANCELED";
-          RCLCPP_WARN(this->get_logger(), "Active goal CANCELED");
+          RCLCPP_WARN(this->get_logger(), "Goal CANCELED");
         } else {
           out.data = "ABORTED";
-          RCLCPP_ERROR(this->get_logger(), "Active goal ABORTED/FAILED");
+          RCLCPP_ERROR(this->get_logger(), "Goal ABORTED");
         }
-        // publish result and clear active state
         result_pub_->publish(out);
-        has_active_traj_ = false;
         active_goal_handle_.reset();
+        has_active_goal_ = false;
       };
 
-    // send and record start time
-    auto fut = action_client_->async_send_goal(goal, send_goal_options);
-    // we don't block waiting for acceptance; but record the time we sent it
-    active_goal_sent_time_ = this->now();
-    active_goal_start_time_ = active_goal_sent_time_;
-    has_active_traj_ = true;
-    current_traj_ = traj;
+    action_client_->async_send_goal(goal, send_goal_options);
   }
 
-  // compute elapsed seconds since active_goal_start_time_
-  double active_elapsed_seconds() const {
-    if (!has_active_traj_) return 0.0;
-    rclcpp::Time now = this->now();
-    return (now - active_goal_start_time_).seconds();
-  }
-
-  // Build a new trajectory that starts at current joint positions (ordered to traj.joint_names),
-  // and includes remaining points from `traj` after `elapsed` seconds, with times scaled by 1/speed_factor.
-  trajectory_msgs::msg::JointTrajectory build_rescaled_remaining(const trajectory_msgs::msg::JointTrajectory & traj,
-                                                                 double elapsed,
-                                                                 double speed_factor)
-  {
-    trajectory_msgs::msg::JointTrajectory out;
-    out.joint_names = traj.joint_names;
-
-    // Point 0: current actual positions, at t=0
-    trajectory_msgs::msg::JointTrajectoryPoint p0;
-    p0.positions.reserve(out.joint_names.size());
-    for (const auto &jn : out.joint_names) {
-      p0.positions.push_back(joint_pos_from_last_state(jn));
-    }
-    p0.time_from_start.sec = 0;
-    p0.time_from_start.nanosec = 0;
-    out.points.push_back(p0);
-
-    if (speed_factor <= 0.0) {
-      // paused — no remaining points appended
-      return out;
-    }
-
-    double factor = 1.0 / std::max(1e-6, speed_factor);
-
-    // For each original point, if its orig_time > elapsed + tiny_eps, include with new time = (orig_time - elapsed) * factor
-    const double tiny_eps = 1e-4;
-    for (const auto &pt : traj.points) {
-      double orig_t = double(pt.time_from_start.sec) + double(pt.time_from_start.nanosec)/1e9;
-      double remaining = orig_t - elapsed;
-      if (remaining <= tiny_eps) continue;
-      double new_t = remaining * factor;
-      trajectory_msgs::msg::JointTrajectoryPoint np;
-      np.positions = pt.positions;
-      np.velocities = pt.velocities;
-      np.accelerations = pt.accelerations;
-      // set time_from_start relative to goal start (now)
-      int64_t sec = static_cast<int64_t>(std::floor(new_t));
-      int64_t nsec = static_cast<int64_t>((new_t - sec) * 1e9);
-      if (nsec < 0) nsec = 0;
-      np.time_from_start.sec = static_cast<int32_t>(sec);
-      np.time_from_start.nanosec = static_cast<uint32_t>(nsec);
-      out.points.push_back(np);
-    }
-    return out;
-  }
-
-  // -------------------------
+  // ----------------------------
   // Callbacks
-  // -------------------------
+  // ----------------------------
   void on_override(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
-    // Replace any active trajectory with this one and send immediately.
-    RCLCPP_INFO(this->get_logger(), "Received override trajectory with %zu points", msg->points.size());
-
-    // cancel any active goal (best-effort)
-    if (action_client_->action_server_is_ready()) {
-      auto fut = action_client_->async_cancel_all_goals();
-      std::this_thread::sleep_for(40ms); // allow cancel to propagate
+    // new final target = last point of msg
+    if (msg->points.empty()) {
+      RCLCPP_WARN(this->get_logger(), "Received override with no points - ignoring");
+      return;
     }
+    // store authoritative original trajectory for simple remaining-point counting
+    original_traj_ = *msg;
 
-    // store and send new trajectory as-is (no queue)
-    current_traj_ = *msg;
-    has_active_traj_ = false; // will be set by send_trajectory_goal
-    current_traj_ = build_rescaled_remaining(current_traj_, 0.0, speed_fraction_); // carry over existing speed
-    send_trajectory_goal(current_traj_);
-    // publish ack
-    std_msgs::msg::String s; s.data = "ACCEPTED";
-    ack_pub_->publish(s);
+    // Grab final positions (last point)
+    target_positions_.clear();
+    target_positions_ = msg->points.back().positions;
+    target_num_points_ = std::max<size_t>(1, msg->points.size() - 1); // number of segments
+
+    // Store that we have a target
+    has_target_ = true;
+
+    // Cancel any running goal and then compute a new traj from current pose -> target
+    cancel_active_goal_wait();
+
+    // If paused (speed <= 0), do not send; just store target
+    if (speed_fraction_ <= 0.0) {
+      RCLCPP_INFO(this->get_logger(), "Override received but node is paused (speed <= 0). Target stored.");
+      // ack anyway
+      std_msgs::msg::String s; s.data = "ACCEPTED";
+      ack_pub_->publish(s);
+      return;
+    }
   }
 
   void on_joint_state(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    // just store the latest joint state for building re-issued trajectories
     last_joint_state_ = msg;
   }
 
   void on_speed(const std_msgs::msg::Float32::SharedPtr msg) {
-    double new_speed = std::clamp(static_cast<double>(msg->data), -1e6, 1.0); // accept <=0 as pause
+    double new_speed = std::clamp(static_cast<double>(msg->data), -1e6, 1.0); // <=0 => pause
     RCLCPP_INFO(this->get_logger(), "Received speed_command = %f", new_speed);
 
-    // if no active traj, just update speed_fraction_ and return
-    if (!has_active_traj_) {
+    // If no active target, just update speed and return
+    if (!has_target_) {
       speed_fraction_ = new_speed;
       return;
     }
 
-    // if speed <= 0 -> pause: cancel current goal and keep current_traj_ intact for resume
+    // Pause case: cancel running goal and do not send another
     if (new_speed <= 0.0) {
       RCLCPP_INFO(this->get_logger(), "Pausing execution (speed <= 0). Cancelling active goal.");
       speed_fraction_ = new_speed;
-      if (action_client_->action_server_is_ready()) {
-        auto fut = action_client_->async_cancel_all_goals();
-        std::this_thread::sleep_for(40ms);
-      }
-      // leave current_traj_ intact so we can resume later
-      has_active_traj_ = true;  // mark that we have a traj but not executing
+      cancel_active_goal_wait();
       return;
     }
 
-    // positive speed -> rescale remaining and reissue
+    // Positive speed: cancel active goal and re-synthesize trajectory from current pose -> same target
     speed_fraction_ = new_speed;
-    RCLCPP_INFO(this->get_logger(), "Rescaling remaining trajectory with speed %f", speed_fraction_);
+    RCLCPP_INFO(this->get_logger(), "Re-issuing trajectory to same target at new speed %f", speed_fraction_);
 
-    // compute elapsed time on the currently active goal
-    double elapsed = active_elapsed_seconds();
-
-    // cancel current goal first
-    if (action_client_->action_server_is_ready()) {
-      auto fut = action_client_->async_cancel_all_goals();
-      std::this_thread::sleep_for(40ms);
-    }
-
-    // Build new trajectory: start at actual pose, append remaining points scaled
-    if (!last_joint_state_) {
-      RCLCPP_WARN(this->get_logger(), "No /joint_states received yet; cannot reissue remaining trajectory reliably.");
-      // simply re-send original trajectory at new speed by constructing scaled version from start
-      auto rescaled = build_rescaled_remaining(current_traj_, 0.0, speed_fraction_);
-      send_trajectory_goal(rescaled);
-      return;
-    }
-
-    // build and send
-    auto new_traj = build_rescaled_remaining(current_traj_, elapsed, speed_fraction_);
-    send_trajectory_goal(new_traj);
+    // cancel and wait shortly to ensure old goal stops before sending new
+    cancel_active_goal_wait();
   }
 };
 
@@ -291,7 +314,6 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<SpeedControlNode>();
-  // use single-threaded spinning
   rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
