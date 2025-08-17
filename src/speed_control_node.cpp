@@ -27,8 +27,10 @@ public:
     speed_fraction_(1.0),
     has_target_(false),
     has_active_goal_(false),
-    base_time_between_points_(1.0),   // base tempo (seconds) per segment at speed=1.0 (bigger is slower)
-    min_time_between_points_(0.02)    // avoid tiny dt that causes jumps
+    min_time_between_points_(0.02),   // avoid tiny dt that causes jumps
+    base_time_between_points_(1.0),   // tunable: base tempo (seconds) per segment at speed=1.0 (bigger is slower)
+    points_per_radian_(4),            // tunable: how many interpolation points per radian of joint-space motion (bigger is slower)
+    max_points_(100)                  // safety cap to avoid huge trajectories
   {
     // joints used by UR5 typical ordering used earlier
     joint_names_ = {"shoulder_pan_joint","shoulder_lift_joint","elbow_joint","wrist_1_joint","wrist_2_joint","wrist_3_joint"};
@@ -69,15 +71,15 @@ private:
   double speed_fraction_;                // 0..1 (0 => pause)
   bool has_target_;
   std::vector<double> target_positions_; // final destination (last point of override)
-  size_t target_num_points_;             // how many segments to create
   bool has_active_goal_;
   std::shared_ptr<GoalHandle> active_goal_handle_;
   trajectory_msgs::msg::JointTrajectory original_traj_;
-  rclcpp::Time active_goal_start_time_;
 
   // timing params
   double base_time_between_points_;
   double min_time_between_points_;
+  double points_per_radian_;
+  int max_points_;
 
   // ----------------------------
   // Utilities
@@ -105,6 +107,25 @@ private:
     return out;
   }
 
+  size_t dist_to_num_pts(std::vector<double>& end_positions) {
+    std::vector<double> start = this->get_current_positions_ordered();
+
+    // compute joint-space L2 distance between start and target
+    double dist = 0.0;
+    size_t n = std::min(start.size(), end_positions.size());
+    for (size_t k = 0; k < n; ++k) {
+      double d = end_positions[k] - start[k];
+      dist += d * d;
+    }
+    dist = std::sqrt(dist);
+
+    // compute points proportional to distance (at least 1), clamp to max_points_
+    int num_pts = std::max(1, static_cast<int>(std::ceil(points_per_radian_ * dist)));
+    num_pts = std::min(num_pts, max_points_);
+
+    return num_pts;
+  }
+
   void cancel_or_resend(bool resend) {
   if (action_client_->action_server_is_ready()) {
     action_client_->async_cancel_all_goals(
@@ -128,7 +149,7 @@ private:
         }
         // build a fresh trajectory: current -> target, using base_time_between_points_ scaled by speed_fraction_
         std::vector<double> start = this->get_current_positions_ordered();
-        int num_pts = static_cast<int>(target_num_points_);
+        size_t num_pts = dist_to_num_pts(target_positions_);
         double tbp = base_time_between_points_ / std::max(1e-6, speed_fraction_);
         trajectory_msgs::msg::JointTrajectory traj = this->generate_trajectory_segment(start, target_positions_, num_pts, tbp);
 
@@ -166,7 +187,7 @@ private:
   trajectory_msgs::msg::JointTrajectory generate_trajectory_segment(
         const std::vector<double>& start_config,
         const std::vector<double>& end_config,
-        int num_points, double tbp)
+        size_t num_points, double tbp)
     {
         trajectory_msgs::msg::JointTrajectory traj_msg;
         traj_msg.joint_names = joint_names_;
@@ -212,7 +233,7 @@ private:
 
     auto send_goal_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
 
-    // when server accepts, store handle (we don't do fancy start-time math)
+    // when server accepts, store handle
     send_goal_options.goal_response_callback =
       [this](const std::shared_ptr<GoalHandle> & goal_handle) {
         std_msgs::msg::String ack;
@@ -224,7 +245,6 @@ private:
           RCLCPP_INFO(this->get_logger(), "Goal accepted by server");
           active_goal_handle_ = goal_handle;
           has_active_goal_ = true;
-          active_goal_start_time_ = this->now();
         }
         ack_pub_->publish(ack);
       };
@@ -265,7 +285,6 @@ private:
     // Grab final positions (last point)
     target_positions_.clear();
     target_positions_ = msg->points.back().positions;
-    target_num_points_ = std::max<size_t>(1, msg->points.size() - 1); // number of segments
 
     // Store that we have a target
     has_target_ = true;
@@ -293,7 +312,7 @@ private:
 
     // If no active target, just update speed and return
     // If no update needed, do same
-    if (!has_target_ || speed_fraction_ - new_speed <= 1e-6) { // arbitrary small margin for float comps
+    if (!has_target_ || std::abs(speed_fraction_ - new_speed) <= 1e-6) { // arbitrary small margin for float comps
       speed_fraction_ = new_speed;
       return;
     }
