@@ -27,7 +27,7 @@ public:
     speed_fraction_(1.0),
     has_target_(false),
     has_active_goal_(false),
-    base_time_between_points_(0.3),   // base tempo (seconds) per segment at speed=1.0
+    base_time_between_points_(1.0),   // base tempo (seconds) per segment at speed=1.0 (bigger is slower)
     min_time_between_points_(0.02)    // avoid tiny dt that causes jumps
   {
     // joints used by UR5 typical ordering used earlier
@@ -105,33 +105,37 @@ private:
     return out;
   }
 
-  void cancel_active_goal_wait() {
+  void cancel_or_resend(bool resend) {
   if (action_client_->action_server_is_ready()) {
     action_client_->async_cancel_all_goals(
-        [this](std::shared_ptr<action_msgs::srv::CancelGoal_Response> response) {
-          if (!response) {
-            RCLCPP_ERROR(this->get_logger(), "Cancellation response was null.");
-            return;
-          }
+      [this, resend](std::shared_ptr<action_msgs::srv::CancelGoal_Response> response) {
+        if (!response) {
+          RCLCPP_ERROR(this->get_logger(), "Cancellation response was null.");
+          return;
+        }
 
-          if (response->return_code == action_msgs::srv::CancelGoal_Response::ERROR_NONE) {
-            RCLCPP_INFO(this->get_logger(), "All goals accepted for cancellation.");
-            // build a fresh trajectory: current -> target, using base_time_between_points_ scaled by speed_fraction_
-            std::vector<double> start = this->get_current_positions_ordered();
-            int num_pts = static_cast<int>(target_num_points_);
-            double tbp = base_time_between_points_ / std::max(1e-6, speed_fraction_);
-            trajectory_msgs::msg::JointTrajectory traj = this->generate_trajectory_segment(start, target_positions_, num_pts, tbp);
+        if (response->return_code != action_msgs::srv::CancelGoal_Response::ERROR_NONE) {
+          RCLCPP_WARN(this->get_logger(), "Cancellation request failed. Will need new speed request.");
+          return;
+        }
 
-            // send it
-            this->send_trajectory_goal(traj);
+        RCLCPP_INFO(this->get_logger(), "All goals accepted for cancellation.");
+        // ack
+        std_msgs::msg::String s; s.data = "ACCEPTED";
+        ack_pub_->publish(s);
+        if (!resend) {
+          return;
+        }
+        // build a fresh trajectory: current -> target, using base_time_between_points_ scaled by speed_fraction_
+        std::vector<double> start = this->get_current_positions_ordered();
+        int num_pts = static_cast<int>(target_num_points_);
+        double tbp = base_time_between_points_ / std::max(1e-6, speed_fraction_);
+        trajectory_msgs::msg::JointTrajectory traj = this->generate_trajectory_segment(start, target_positions_, num_pts, tbp);
 
-            // ack
-            std_msgs::msg::String s; s.data = "ACCEPTED";
-            ack_pub_->publish(s);
-          } else {
-            RCLCPP_WARN(this->get_logger(), "Cancellation request failed.");
-          }
-        });
+        // send it
+        this->send_trajectory_goal(traj);
+      }
+    );
   } else {
     RCLCPP_WARN(this->get_logger(), "Action server not ready, cannot send cancel request.");
   }
@@ -139,7 +143,7 @@ private:
 
   // cancel active goal (best-effort) and wait briefly for cancellation to propagate
   /*
-  void cancel_active_goal_wait() {
+  void cancel_or_resend() {
     if (!action_client_) return;
     if (active_goal_handle_) {
       // wait short time for cancel to process
@@ -267,7 +271,7 @@ private:
     has_target_ = true;
 
     // Cancel any running goal and then compute a new traj from current pose -> target
-    cancel_active_goal_wait();
+    cancel_or_resend(true);
 
     // If paused (speed <= 0), do not send; just store target
     if (speed_fraction_ <= 0.0) {
@@ -284,11 +288,12 @@ private:
   }
 
   void on_speed(const std_msgs::msg::Float32::SharedPtr msg) {
-    double new_speed = std::clamp(static_cast<double>(msg->data), -1e6, 1.0); // <=0 => pause
+    double new_speed = std::clamp(static_cast<double>(msg->data), 0.0, 1.0); // <=0 => pause
     RCLCPP_INFO(this->get_logger(), "Received speed_command = %f", new_speed);
 
     // If no active target, just update speed and return
-    if (!has_target_) {
+    // If no update needed, do same
+    if (!has_target_ || speed_fraction_ - new_speed <= 1e-6) { // arbitrary small margin for float comps
       speed_fraction_ = new_speed;
       return;
     }
@@ -297,7 +302,7 @@ private:
     if (new_speed <= 0.0) {
       RCLCPP_INFO(this->get_logger(), "Pausing execution (speed <= 0). Cancelling active goal.");
       speed_fraction_ = new_speed;
-      cancel_active_goal_wait();
+      cancel_or_resend(false);
       return;
     }
 
@@ -306,7 +311,7 @@ private:
     RCLCPP_INFO(this->get_logger(), "Re-issuing trajectory to same target at new speed %f", speed_fraction_);
 
     // cancel and wait shortly to ensure old goal stops before sending new
-    cancel_active_goal_wait();
+    cancel_or_resend(true);
   }
 };
 

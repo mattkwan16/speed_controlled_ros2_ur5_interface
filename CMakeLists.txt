@@ -58,6 +58,11 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  nodes/proximity_sensor_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install the launch directory
 install(
   DIRECTORY 
