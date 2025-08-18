@@ -60,6 +60,7 @@ install(TARGETS
 
 install(PROGRAMS
   nodes/proximity_sensor_node
+  nodes/estop_controller_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

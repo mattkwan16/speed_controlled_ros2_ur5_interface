@@ -1,10 +1,9 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, GroupAction, Shutdown, RegisterEventHandler
+from launch.actions import IncludeLaunchDescription, GroupAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.event_handlers import OnShutdown, OnProcessExit, OnProcessIO
 
 def generate_launch_description():
     """Launch the UR5 simulation and trajectory publisher."""
@@ -37,6 +36,14 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Node: estop
+    estop_controller_node = Node(
+        package='speed_controlled_ros2_ur5_interface',
+        executable='estop_controller_node',
+        name='estop_controller_node',
+        output='screen'
+    )
+
     # Create a group action for the launch description
     launch_group = GroupAction(
         actions=[
@@ -45,7 +52,8 @@ def generate_launch_description():
             ),
             trajectory_publisher_node,
             speed_control_node,
-            proximity_sensor_node 
+            proximity_sensor_node,
+            estop_controller_node
         ]
     )
 

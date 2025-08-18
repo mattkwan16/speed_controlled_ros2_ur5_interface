@@ -2,6 +2,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory_point.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
@@ -39,6 +40,10 @@ public:
       "/override_trajectory", 10,
       std::bind(&SpeedControlNode::on_override, this, std::placeholders::_1));
 
+    estop_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/estop", 10,
+      std::bind(&SpeedControlNode::on_estop, this, std::placeholders::_1));
+
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
       "/joint_states", 100,
       std::bind(&SpeedControlNode::on_joint_state, this, std::placeholders::_1));
@@ -61,6 +66,7 @@ private:
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr override_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr speed_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ack_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr result_pub_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
@@ -74,6 +80,7 @@ private:
   bool has_active_goal_;
   std::shared_ptr<GoalHandle> active_goal_handle_;
   trajectory_msgs::msg::JointTrajectory original_traj_;
+  double original_speed_fraction_;
 
   // timing params
   double base_time_between_points_;
@@ -161,27 +168,6 @@ private:
     RCLCPP_WARN(this->get_logger(), "Action server not ready, cannot send cancel request.");
   }
 }
-
-  // cancel active goal (best-effort) and wait briefly for cancellation to propagate
-  /*
-  void cancel_or_resend() {
-    if (!action_client_) return;
-    if (active_goal_handle_) {
-      // wait short time for cancel to process
-      auto fut = action_client_->async_cancel_all_goals();
-      std::this_thread::sleep_for(500ms);
-      active_goal_handle_.reset();
-      has_active_goal_ = false;
-      std::this_thread::sleep_for(20ms);
-      return;
-    }
-    // fallback
-    auto fut2 = action_client_->async_cancel_all_goals();
-    std::this_thread::sleep_for(500ms);
-    has_active_goal_ = false;
-    std::this_thread::sleep_for(20ms);
-  }
-  */
 
   // adapted from publish_trajectory_node.cpp
   trajectory_msgs::msg::JointTrajectory generate_trajectory_segment(
@@ -279,8 +265,6 @@ private:
       RCLCPP_WARN(this->get_logger(), "Received override with no points - ignoring");
       return;
     }
-    // store authoritative original trajectory for simple remaining-point counting
-    original_traj_ = *msg;
 
     // Grab final positions (last point)
     target_positions_.clear();
@@ -302,6 +286,19 @@ private:
     }
   }
 
+  void on_estop(const std_msgs::msg::Bool estop_on) {
+    if (estop_on.data) {
+      RCLCPP_INFO(this->get_logger(), "ESTOP ON");
+      original_speed_fraction_ = speed_fraction_;
+      speed_fraction_ = 0.0;
+      cancel_or_resend(false);
+    } else {
+      RCLCPP_INFO(this->get_logger(), "ESTOP OFF");
+      speed_fraction_ = original_speed_fraction_;
+      cancel_or_resend(true);
+    }
+  }
+
   void on_joint_state(const sensor_msgs::msg::JointState::SharedPtr msg) {
     last_joint_state_ = msg;
   }
@@ -319,7 +316,7 @@ private:
 
     // Pause case: cancel running goal and do not send another
     if (new_speed <= 0.0) {
-      RCLCPP_INFO(this->get_logger(), "Pausing execution (speed <= 0). Cancelling active goal.");
+      RCLCPP_INFO(this->get_logger(), "Pausing execution. Cancelling active goal.");
       speed_fraction_ = new_speed;
       cancel_or_resend(false);
       return;

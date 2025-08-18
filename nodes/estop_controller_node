@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool, Float32
+from controller_manager_msgs.srv import SwitchController
+from std_srvs.srv import Trigger
+
+class EstopControllerNode(Node):
+    def __init__(self):
+        super().__init__('estop_controller_node')
+        self.controller_name = 'scaled_joint_trajectory_controller'
+
+        # Tracking
+        self.is_estopped = False
+        self.stop_fut = None
+        self.start_fut = None
+
+        # Publishers
+        self.speed_pub = self.create_publisher(Float32, '/speed_command', 10)
+        self.estop_pub = self.create_publisher(Bool, '/estop', 10)
+
+        # Service client to switch controllers
+        self.switch_cli = self.create_client(SwitchController, '/controller_manager/switch_controller')
+        self.get_logger().info('Waiting for /controller_manager/switch_controller...')
+        if not self.switch_cli.wait_for_service(timeout_sec=None):
+            self.get_logger().warn('Switch service not available yet; blocking until ready.')
+
+        self.srv_on = self.create_service(Trigger, 'estop_on', self.handle_estop_on)
+        self.srv_off = self.create_service(Trigger, 'estop_off', self.handle_estop_off)
+
+        self.get_logger().info('estop_controller_node ready')
+
+    # Service callbacks (fast)
+    def handle_estop_on(self, request, response):
+        """Service handler to engage estop."""
+        try:
+            self.activate_estop()
+            response.success = True
+            response.message = 'E-STOP engaged'
+        except Exception as e:
+            response.success = False
+            response.message = f'Failed to engage estop: {e}'
+        return response
+
+    def handle_estop_off(self, request, response):
+        """Service handler to clear estop."""
+        try:
+            self.deactivate_estop()
+            response.success = True
+            response.message = 'E-STOP cleared'
+        except Exception as e:
+            response.success = False
+            response.message = f'Failed to clear estop: {e}'
+        return response
+
+    def activate_estop(self):
+        self.get_logger().warn('E-STOP ENGAGED -> stopping controller')
+        self.is_estopped = True
+        self.stop_controller()
+        b = Bool()
+        b.data = True
+        self.estop_pub.publish(b)
+        f = Float32()
+        f.data = 0.0
+        self.speed_pub.publish(f)
+        self.get_logger().info(f'Speed_command: {f.data}')
+    def deactivate_estop(self):
+        self.get_logger().info('E-STOP CLEARED -> resuming controller')
+        self.is_estopped = False
+        self.start_controller()
+        b = Bool()
+        b.data = False
+        self.estop_pub.publish(b)
+
+    def start_controller(self):
+        if not self.switch_cli.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error('Switch service not available to start controller')
+            return
+        req = SwitchController.Request()
+        req.activate_controllers = [self.controller_name]
+        req.deactivate_controllers = []
+        req.strictness = SwitchController.Request.BEST_EFFORT
+        self.start_fut = self.switch_cli.call_async(req)
+        self.start_fut.add_done_callback(self.switch_cli_callback)
+
+    def stop_controller(self):
+        if not self.switch_cli.wait_for_service(timeout_sec=None): # None means block until complete
+            self.get_logger().error('Switch service not available to stop controller')
+            return
+        req = SwitchController.Request()
+        req.deactivate_controllers = [self.controller_name]
+        req.activate_controllers = []
+        req.strictness = SwitchController.Request.FORCE_AUTO
+        self.stop_fut = self.switch_cli.call_async(req)
+        self.stop_fut.add_done_callback(self.switch_cli_callback)
+
+    def switch_cli_callback(self, fut):
+        if fut.done() and fut.result() is not None:
+            self.get_logger().info('Switch controller requested')
+        else:
+            self.get_logger().error('Switch controller failed')
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = EstopControllerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
