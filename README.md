@@ -53,6 +53,12 @@ This project implements Proximity-Based Speed Control with Emergency Stop on the
 │   └── readme.md
 ```
 
+## Node Diagram
+
+<p style="display: block; margin-left: auto; margin-right: auto;">
+<img src="images/rosgraph.png" width="45%" style="display: inline-block; margin-right: 5px;" /> 
+</p>
+
 ## Additional Notes
 
 This repo is forked from the [UR5 Simulation Repository](https://github.com/pla10/ros2_ur5_interface/tree/main). Their readme is included in full below and can be used as additional reference for installation, usage, background, etc. As such, this fork is protected under the MIT License as did the original.
