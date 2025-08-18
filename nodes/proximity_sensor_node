@@ -14,8 +14,6 @@ class ProximitySensorNode(Node):
         # publisher for speed commands
         self.speed_pub = self.create_publisher(Float32, '/speed_command', 10)
 
-        self.override_sub = self.create_subscription(String, '/override_ack',
-            self.override_ack_callback,10)
         self.estop_sub = self.create_subscription(Bool, '/estop',
             self.estop_callback,10)
 
@@ -53,17 +51,17 @@ class ProximitySensorNode(Node):
         # TOOD: add a subscriber to make sure no one else has been adjusting the speed
         self.current_speed = 1.0
         self.estopped = False
-        self.acked = False
+        self.avg_dist = 0.0
+        self.speed_status = "FULL_SPEED"
 
     def estop_callback(self, msg):
         self.estopped = msg.data
         if (self.estopped):
             self.current_speed = 0.0
 
-    def override_ack_callback(self, msg):
-        self.acked = (str(msg.data) == "ACCEPTED") # TODO: avoid hard-coding str
-
     def check_distance(self):
+        self.get_logger().info(f"STATUS: Speed={self.speed_status} ({self.current_speed:.2f}), E-Stop={self.estopped}, dist-size={self.avg_dist:.1f} mm",
+            throttle_duration_sec=1.0)
         if self.estopped:
             return
         try:
@@ -90,27 +88,25 @@ class ProximitySensorNode(Node):
 
         # remove gripper size (approx, with safety margin)
         avg_dist -= self.gripper_size_mm
+        self.avg_dist = avg_dist
 
         # determine speed command
         if avg_dist <= self.stop_distance_mm:
             speed = 0.0
+            self.speed_status = "STOP"
         elif avg_dist <= self.slow_distance_mm:
             speed = self.slow_speed
+            self.speed_status = "SLOW"
         else:
             speed = self.normal_speed
+            self.speed_status = "FULL_SPEED"
         
-        # keep sending speed commands until its ack'ed
-        if speed != self.current_speed: #not self.acked or
+        if speed != self.current_speed: 
             msg = Float32()
             msg.data = speed
             self.speed_pub.publish(msg)
             self.current_speed = speed
-            self.acked = False
             self.get_logger().debug(f"Publishing! Speed={speed:.2f}")
-
-        self.get_logger().info(f"Dist-size={avg_dist:.1f} mm -> Speed={speed:.2f}",
-            throttle_duration_sec=2.0)
-
 
 def main(args=None):
     rclpy.init(args=args)

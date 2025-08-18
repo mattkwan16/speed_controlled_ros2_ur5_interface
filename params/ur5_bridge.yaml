@@ -4,12 +4,6 @@
   gz_type_name: "gz.msgs.Clock"
   direction: GZ_TO_ROS
 
-# ros_gz_bridge
-- ros_service_name: "/world/default/set_pose"
-  gz_service_name: "/world/default/set_pose"
-  ros_service_type: "ros_gz_interfaces/srv/SetEntityPose"
-  gz_service_type: "gz.msgs.Pose"
-
 # gz topic published by Sensors plugin (Camera)
 - ros_topic_name: "camera/image_raw/camera_info"
   gz_topic_name: "camera/image_raw/camera_info"

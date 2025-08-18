@@ -18,7 +18,37 @@ This project implements Proximity-Based Speed Control with Emergency Stop on the
 5. In the Terminator window, run `./make.sh`
 6. In the Terminator window, run `./start.sh`
 7. You will see a robotic arm move towards a block, slow down, then stop before reaching the block.
-8. Use the scripts in the `testing` directory in any combination to play out various scenarios live in Gazebo.
+8. In a separate Terminator tab/window/split, use the scripts in the `testing` directory in any combination to play out various scenarios live in Gazebo.
+
+## New/(Significantly) Updated Files
+```
+├── CMakeLists.txt
+├── LICENSE
+├── README.md
+├── clean.sh
+├── docker
+│   ├── Dockerfile
+│   └── entrypoint.sh
+├── launch
+│   ├── estop_controller.launch.py
+│   └── sim_with_trajectory.launch.py
+├── make.sh
+├── nodes
+│   ├── estop_controller_node
+│   └── proximity_sensor_node
+├── open.sh
+├── package.xml
+├── src
+│   ├── publish_trajectory_node.cpp
+│   └── speed_control_node.cpp
+├── start.sh
+├── testing
+│   ├── estop_off.sh
+│   ├── estop_on.sh
+│   ├── move_block_away.sh
+│   ├── move_block_close.sh
+│   └── readme.md
+```
 
 ## Additional Notes
 
@@ -26,6 +56,7 @@ This repo is forked from the [UR5 Simulation Repository](https://github.com/pla1
 
 Credit: much of the code in this repo was inspired by or adapted from products of AI tools such as Gemini and ChatGPT. Some new code portions are adapted from existing snippets from the UR5 repo from which this repo is forked.
 
+This project is a work-in-progress for practice purposes only. That being said, feel free to reach out with questions or concerns!
 
 # UR5 Simulation Repository
 
