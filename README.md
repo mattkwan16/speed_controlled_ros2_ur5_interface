@@ -55,9 +55,7 @@ This project implements Proximity-Based Speed Control with Emergency Stop on the
 
 ## Node Diagram
 
-<p style="display: block; margin-left: auto; margin-right: auto;">
-<img src="images/rosgraph.png" width="45%" style="display: inline-block; margin-right: 5px;" /> 
-</p>
+<img style="display: block; margin-left: auto; margin-right: auto;" alt="Node diagram" width="800" src="images/rosgraph.png">
 
 ## Additional Notes
 
