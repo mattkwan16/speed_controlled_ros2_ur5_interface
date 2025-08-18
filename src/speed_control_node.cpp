@@ -26,12 +26,11 @@ public:
   SpeedControlNode()
   : Node("speed_control_node"),
     speed_fraction_(1.0),
+    original_speed_fraction_(1.0),
     has_target_(false),
-    has_active_goal_(false),
-    min_time_between_points_(0.02),   // avoid tiny dt that causes jumps
+    estopped_(false),
     base_time_between_points_(1.0),   // tunable: base tempo (seconds) per segment at speed=1.0 (bigger is slower)
-    points_per_radian_(4),            // tunable: how many interpolation points per radian of joint-space motion (bigger is slower)
-    max_points_(100)                  // safety cap to avoid huge trajectories
+    points_per_radian_(4)             // tunable: how many interpolation points per radian of joint-space motion (bigger is slower)
   {
     // joints used by UR5 typical ordering used earlier
     joint_names_ = {"shoulder_pan_joint","shoulder_lift_joint","elbow_joint","wrist_1_joint","wrist_2_joint","wrist_3_joint"};
@@ -75,18 +74,15 @@ private:
   std::vector<std::string> joint_names_;
   sensor_msgs::msg::JointState::SharedPtr last_joint_state_;
   double speed_fraction_;                // 0..1 (0 => pause)
+  double original_speed_fraction_;
   bool has_target_;
   std::vector<double> target_positions_; // final destination (last point of override)
-  bool has_active_goal_;
-  std::shared_ptr<GoalHandle> active_goal_handle_;
   trajectory_msgs::msg::JointTrajectory original_traj_;
-  double original_speed_fraction_;
+  bool estopped_;
 
   // timing params
   double base_time_between_points_;
-  double min_time_between_points_;
   double points_per_radian_;
-  int max_points_;
 
   // ----------------------------
   // Utilities
@@ -126,11 +122,8 @@ private:
     }
     dist = std::sqrt(dist);
 
-    // compute points proportional to distance (at least 1), clamp to max_points_
-    int num_pts = std::max(1, static_cast<int>(std::ceil(points_per_radian_ * dist)));
-    num_pts = std::min(num_pts, max_points_);
-
-    return num_pts;
+    // compute points proportional to distance (at least 1)
+    return std::max(1, static_cast<int>(std::ceil(points_per_radian_ * dist)));;
   }
 
   void cancel_or_resend(bool resend) {
@@ -181,7 +174,7 @@ private:
         // Total interpolation time (N points * tbp)
         double total_time = (num_points * tbp) == 0 ? 1 : num_points * tbp;
 
-        for (int i = 0; i <= num_points; i++)
+        for (size_t i = 0; i <= num_points; i++)
         {
             trajectory_msgs::msg::JointTrajectoryPoint point;
             double t = i * tbp;
@@ -191,7 +184,7 @@ private:
                 double interpolated_position = start_config[j] + (t / total_time) * (end_config[j] - start_config[j]);
                 point.positions.push_back(interpolated_position);
             }
-            RCLCPP_INFO(this->get_logger(), "Trajectory point %d: %f %f %f %f %f %f", i, point.positions[0], point.positions[1], point.positions[2], point.positions[3], point.positions[4], point.positions[5]);
+            RCLCPP_INFO(this->get_logger(), "Trajectory point %zu: %f %f %f %f %f %f", i, point.positions[0], point.positions[1], point.positions[2], point.positions[3], point.positions[4], point.positions[5]);
 
             point.time_from_start = rclcpp::Duration::from_seconds(t);
             traj_msg.points.push_back(point);
@@ -229,8 +222,6 @@ private:
         } else {
           ack.data = "ACCEPTED";
           RCLCPP_INFO(this->get_logger(), "Goal accepted by server");
-          active_goal_handle_ = goal_handle;
-          has_active_goal_ = true;
         }
         ack_pub_->publish(ack);
       };
@@ -249,8 +240,6 @@ private:
           RCLCPP_ERROR(this->get_logger(), "Goal ABORTED");
         }
         result_pub_->publish(out);
-        active_goal_handle_.reset();
-        has_active_goal_ = false;
       };
 
     action_client_->async_send_goal(goal, send_goal_options);
@@ -273,6 +262,9 @@ private:
     // Store that we have a target
     has_target_ = true;
 
+    if (estopped_)
+      return;
+
     // Cancel any running goal and then compute a new traj from current pose -> target
     cancel_or_resend(true);
 
@@ -292,8 +284,11 @@ private:
       original_speed_fraction_ = speed_fraction_;
       speed_fraction_ = 0.0;
       cancel_or_resend(false);
-    } else {
-      RCLCPP_INFO(this->get_logger(), "ESTOP OFF");
+      return;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "ESTOP OFF");
+    if (estopped_) {
       speed_fraction_ = original_speed_fraction_;
       cancel_or_resend(true);
     }
@@ -309,7 +304,7 @@ private:
 
     // If no active target, just update speed and return
     // If no update needed, do same
-    if (!has_target_ || std::abs(speed_fraction_ - new_speed) <= 1e-6) { // arbitrary small margin for float comps
+    if (estopped_ || !has_target_ || std::abs(speed_fraction_ - new_speed) <= 1e-6) { // 1e-6 is arbitrary small margin for float comps
       speed_fraction_ = new_speed;
       return;
     }

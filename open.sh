@@ -1,7 +1,6 @@
 #!/bin/bash
 
 echo "Open http://localhost:6081/ to continue"
-# TODO: replace mkwan with non-hardcoded
 docker run --rm -it -p 6081:80 -p 50000-50020:50000-50020 \
 -v "$(pwd)/docker/entrypoint.sh:/entrypoint.sh" \
 -v "$(pwd)/:$(pwd)/" \
