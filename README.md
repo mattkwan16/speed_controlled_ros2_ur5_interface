@@ -18,7 +18,10 @@ This project implements Proximity-Based Speed Control with Emergency Stop on the
 5. In the Terminator window, run `./make.sh`
 6. In the Terminator window, run `./start.sh`
 7. You will see a robotic arm move towards a block, slow down, then stop before reaching the block.
-8. In a separate Terminator tab/window/split, use the scripts in the `testing` directory in any combination to play out various scenarios live in Gazebo.
+8. In a separate Terminator tab/window/split, use the scripts in the `testing` directory in any combination to play out various scenarios live in Gazebo, such as: 
+    * moving the block away to have the cobot continue its loop; 
+    * turning on/off the estop to watch the cobot freeze in place and resume; 
+    * moving the block close by to interrupt the cobot's loop.
 
 ## New/(Significantly) Updated Files
 ```
