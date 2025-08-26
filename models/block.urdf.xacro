@@ -6,7 +6,7 @@
   <xacro:macro name="block" params="block_number block_type">
 
     <!-- Parameters for reusability -->
-    <xacro:property name="mesh_path" value="$(find ros2_ur5_interface)/models/meshes/${block_type}.stl" />
+    <xacro:property name="mesh_path" value="$(find speed_controlled_ros2_ur5_interface)/models/meshes/${block_type}.stl" />
     <xacro:property name="mass" value="0.01" />
     <xacro:property name="ixx" value="3.604e-6" />
     <xacro:property name="iyy" value="3.604e-6" />

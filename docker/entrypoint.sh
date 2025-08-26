@@ -83,13 +83,6 @@ mkdir -p "$HOME/.ros"
 cp -r /root/.ros/rosdep "$HOME/.ros/rosdep"
 chown -R "$USER:$USER" "$HOME/.ros"
 
-# Install ros2_ur5_interface
-source /opt/ros/$ROS_DISTRO/setup.bash
-git clone https://github.com/pla10/ros2_ur5_interface.git $HOME/ros2_ws/src/ros2_ur5_interface
-cd $HOME/ros2_ws
-colcon build --symlink-install
-chown -R $USER:$USER $HOME/ros2_ws
-
 # Add terminator shortcut
 mkdir -p "$HOME/Desktop"
 cat << EOF > "$HOME/Desktop/terminator.desktop"
@@ -122,4 +115,4 @@ echo "NOTE 1: --security-opt seccomp=unconfined flag is required to launch Ubunt
 echo -e 'See \e]8;;https://github.com/Tiryoh/docker-ros2-desktop-vnc/pull/56\e\\https://github.com/Tiryoh/docker-ros2-desktop-vnc/pull/56\e]8;;\e\\'
 echo "============================================================================================"
 
-exec /bin/tini -- supervisord -n -c /etc/supervisor/supervisord.conf
+exec /bin/tini -- supervisord -n -c /etc/supervisor/supervisord.conf &

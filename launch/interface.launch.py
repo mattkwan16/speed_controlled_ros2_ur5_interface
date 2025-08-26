@@ -7,7 +7,7 @@ from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
-package_name = 'ros2_ur5_interface'
+package_name = 'speed_controlled_ros2_ur5_interface'
 
 def generate_launch_description():
     # Declare the robot IP address argument
@@ -55,7 +55,7 @@ def generate_launch_description():
     )
 
     activate_gripper = Node(
-        package='ros2_ur5_interface',
+        package='speed_controlled_ros2_ur5_interface',
         executable='gripper_service',
         arguments=[LaunchConfiguration("robot_ip")],
         output='screen',

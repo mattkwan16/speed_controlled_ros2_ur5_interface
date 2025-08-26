@@ -92,13 +92,15 @@ RUN apt-get update -q && \
     rosdep init && \
     rm -rf /var/lib/apt/lists/*
 
+# Install terminator
+RUN apt-get update -q && \
+    apt-get install -y terminator && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN rosdep update
 
 # Enable apt-get completion after running `apt-get update` in the container
 RUN rm /etc/apt/apt.conf.d/docker-clean
-
-COPY ./entrypoint.sh /
-ENTRYPOINT [ "/bin/bash", "-c", "/entrypoint.sh" ]
 
 ENV USER ubuntu
 ENV PASSWD ubuntu

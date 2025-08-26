@@ -1,3 +1,70 @@
+# Speed Controlled Cobot with E-Stop
+Matt Kwan\
+August 2025
+
+
+This project implements Proximity-Based Speed Control with Emergency Stop on the UR5 Simulation cobot.
+
+## Installation
+1. `git clone` this repo
+2. `cd docker`
+3. `docker build . -t mattkwan/speed_controlled_ros2_ur5_interface:latest`
+
+## Usage
+1. In this repo, run `./open.sh`
+2. In an internet browser, go to http://localhost:6081/
+3. Click "connect"
+4. Double-click the Terminator icon
+5. In the Terminator window, run `./make.sh`
+6. In the Terminator window, run `./start.sh`
+7. You will see a robotic arm move towards a block, slow down, then stop before reaching the block.
+8. In a separate Terminator tab/window/split, use the scripts in the `testing` directory in any combination to play out various scenarios live in Gazebo, such as: 
+    * moving the block away to have the cobot continue its loop; 
+    * turning on/off the estop to watch the cobot freeze in place and resume; 
+    * moving the block close by to interrupt the cobot's loop.
+
+## New/(Significantly) Updated Files
+```
+├── CMakeLists.txt
+├── LICENSE
+├── README.md
+├── clean.sh
+├── docker
+│   ├── Dockerfile
+│   └── entrypoint.sh
+├── launch
+│   ├── estop_controller.launch.py
+│   └── sim_with_trajectory.launch.py
+├── make.sh
+├── nodes
+│   ├── estop_controller_node
+│   └── proximity_sensor_node
+├── open.sh
+├── package.xml
+├── src
+│   ├── publish_trajectory_node.cpp
+│   └── speed_control_node.cpp
+├── start.sh
+├── testing
+│   ├── estop_off.sh
+│   ├── estop_on.sh
+│   ├── move_block_away.sh
+│   ├── move_block_close.sh
+│   └── readme.md
+```
+
+## Node Diagram
+
+<img style="display: block; margin-left: auto; margin-right: auto;" alt="Node diagram" width="800" src="images/rosgraph.png">
+
+## Additional Notes
+
+This repo is forked from the [UR5 Simulation Repository](https://github.com/pla10/ros2_ur5_interface/tree/main). Their readme is included in full below and can be used as additional reference for installation, usage, background, etc. As such, this fork is protected under the MIT License as did the original.
+
+Credit: much of the code in this repo was inspired by or adapted from products of AI tools such as Gemini and ChatGPT. Some new code portions are adapted from existing snippets from the UR5 repo from which this repo is forked.
+
+This project is a work-in-progress for practice purposes only. That being said, feel free to reach out with questions or concerns!
+
 # UR5 Simulation Repository
 
 This repository provides **auxiliary resources** to help students and robotics enthusiasts visualize simulations and create new nodes for their projects. It complements the [**pla10/ros2_ur5_interface**](https://hub.docker.com/r/pla10/ros2_ur5_interface) Docker image, which delivers a pre-configured ROS 2 Jazzy environment tailored for the **UR5 manipulator robot**.

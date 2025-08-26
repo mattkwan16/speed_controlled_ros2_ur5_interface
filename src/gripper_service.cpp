@@ -26,7 +26,7 @@ public:
           current_state_("neutral")
     {
         // Dynamically find script paths
-        std::string package_share_dir = ament_index_cpp::get_package_share_directory("ros2_ur5_interface");
+        std::string package_share_dir = ament_index_cpp::get_package_share_directory("speed_controlled_ros2_ur5_interface");
         close_script_ = package_share_dir + "/gripper/close.script";
         open_script_ = package_share_dir + "/gripper/open.script";
         neutral_from_open_script_ = package_share_dir + "/gripper/neutral_from_open.script";
@@ -222,7 +222,7 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        std::cerr << "Usage: ros2 run ros2_ur5_interface gripper_service <robot_ip>" << std::endl;
+        std::cerr << "Usage: ros2 run speed_controlled_ros2_ur5_interface gripper_service <robot_ip>" << std::endl;
         return 1;
     }
 

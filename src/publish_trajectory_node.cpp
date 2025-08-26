@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <control_msgs/msg/joint_tolerance.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -30,21 +31,24 @@ public:
         subscription_ = this->create_subscription<sensor_msgs::msg::JointState>(
             "joint_states", 10, std::bind(&TrajectoryActionClient::joint_state_callback, this, std::placeholders::_1));
 
+        // sender to speed controller
+        override_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/override_trajectory", 10);
+        override_ack_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "/override_ack", 10, [this](const std_msgs::msg::String::SharedPtr msg){
+                RCLCPP_INFO(this->get_logger(), "ACK: %s", msg->data.c_str());
+            });
+
+        override_result_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "/override_result", 10, std::bind(&TrajectoryActionClient::override_result_cb, this, std::placeholders::_1));
+
         open_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("open_gripper");
         close_gripper_client_ = this->create_client<std_srvs::srv::Trigger>("close_gripper");
 
-        if (!action_client_->wait_for_action_server(10s))
-        {
-            RCLCPP_ERROR(this->get_logger(), "Action server not available after waiting");
-            rclcpp::shutdown();
-            return;
+        while (!action_client_->wait_for_action_server(3s)) {
+            RCLCPP_WARN(this->get_logger(), "Waiting for action server...");
         }
-
-        if (!open_gripper_client_->wait_for_service(10s))
-        {
-            RCLCPP_ERROR(this->get_logger(), "Gripper service not available after waiting");
-            rclcpp::shutdown();
-            return;
+        while (!open_gripper_client_->wait_for_service(3s)) {
+            RCLCPP_WARN(this->get_logger(), "Waiting for gripper service...");
         }
 
         time_between_points_ = 0.5; // Time between points in seconds
@@ -53,6 +57,9 @@ public:
 private:
     rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr subscription_;
+    rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr override_pub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr override_ack_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr override_result_sub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr open_gripper_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr close_gripper_client_;
     double time_between_points_;
@@ -146,6 +153,7 @@ private:
 
     void prepare_trajectories()
     {
+        // Trajectories are expected to loop
         // Define the trajectories
         // Trajectory 1
         trajectory_msgs::msg::JointTrajectory traj1;
@@ -168,10 +176,11 @@ private:
 
     void send_next_trajectory()
     {
+        // Trajectories are expected to loop
         if (current_trajectory_index_ >= trajectories_.size())
         {
-            RCLCPP_INFO(this->get_logger(), "All trajectories executed successfully");
-            return;
+            RCLCPP_INFO(this->get_logger(), "All trajectories executed successfully. Next loop.");
+            current_trajectory_index_ = 0;
         }
 
         auto goal_msg = FollowJointTrajectory::Goal();
@@ -179,7 +188,7 @@ private:
         goal_msg.goal_time_tolerance.nanosec = 500000000;
 
         RCLCPP_INFO(this->get_logger(), "Sending trajectory goal %zu", current_trajectory_index_ + 1);
-
+/*
         auto send_goal_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
         send_goal_options.goal_response_callback =
             [this](const GoalHandleFollowJointTrajectory::SharedPtr &goal_handle) {
@@ -212,34 +221,23 @@ private:
                     break;
                 }
             };
+*/
+        // Send to speed scaler
+        override_pub_->publish(trajectories_[current_trajectory_index_]);
+    }
 
-        action_client_->async_send_goal(goal_msg, send_goal_options);
+    void override_result_cb(const std_msgs::msg::String::SharedPtr msg)
+    {
+        if (msg->data == "SUCCEEDED") {
+            RCLCPP_INFO(this->get_logger(), "Success: Override result: %s", msg->data.c_str());
+            handle_trajectory_success();
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Warn: Override result: %s", msg->data.c_str());
+        }
     }
 
     void handle_trajectory_success()
     {
-        // Call the gripper service based on the trajectory index
-        auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-        auto future = close_gripper_client_->async_send_request(request);
-        std::this_thread::sleep_for(2s);
-
-        if (future.wait_for(5s) == std::future_status::ready)
-        {
-            auto response = future.get();
-            if (response->success)
-            {
-                RCLCPP_INFO(this->get_logger(), "Gripper service call succeeded: %s", response->message.c_str());
-            }
-            else
-            {
-                RCLCPP_WARN(this->get_logger(), "Gripper service call failed: %s", response->message.c_str());
-            }
-        }
-        else
-        {
-            RCLCPP_ERROR(this->get_logger(), "Gripper service call timed out");
-        }
-
         // Proceed to the next trajectory
         current_trajectory_index_++;
         send_next_trajectory();
